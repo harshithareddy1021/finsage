@@ -3,3 +3,14 @@ __pycache__/
 *.pyc
 .env
 .DS_Store
+data/
+
+.streamlit/
+
+*.db
+
+data/
+
+.streamlit/
+
+*.db
