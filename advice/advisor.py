@@ -139,3 +139,6 @@ def query_rag(question: str, spending_context: str = "") -> dict:
     if spending_context:
         full_question = f"{question}\n\nUser's spending context: {spending_context}"
     return chain.invoke({"query": full_question})
+def has_book_indexed() -> bool:
+    """Check if a financial book has been uploaded and indexed."""
+    return os.path.exists(CHROMA_DIR) and len(os.listdir(CHROMA_DIR)) > 0
