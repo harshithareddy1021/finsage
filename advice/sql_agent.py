@@ -5,18 +5,12 @@ from database.db import get_db_path, create_table
 from utils.helpers import GROQ_API_KEY
 
 def get_sql_agent():
-    """
-    Creates a LangChain SQL Agent that converts natural language
-    questions into SQL queries over the expenses database.
-    """
-    create_table()  # Ensure table exists
-
+    create_table()
     db_path = get_db_path()
     db = SQLDatabase.from_uri(f"sqlite:///{db_path}")
 
     llm = ChatGroq(
         api_key=GROQ_API_KEY,
-       
         model="llama-3.3-70b-versatile",
         temperature=0
     )
@@ -30,13 +24,15 @@ def get_sql_agent():
     return agent
 
 def query_expenses(question: str) -> str:
-    """
-    Takes a natural language question and returns an answer
-    based on the expenses database.
-    """
     try:
         agent = get_sql_agent()
-        response = agent.invoke({"input": question})
+        instruction = (
+            f"All amounts in the database are in Indian Rupees (₹). "
+            f"Always use the ₹ symbol in your answer. "
+            f"Use the 'amount' column for all calculations — it is always in INR. "
+            f"Question: {question}"
+        )
+        response = agent.invoke({"input": instruction})
         return response.get("output", "Could not generate a response.")
     except Exception as e:
         return f"Error querying expenses: {str(e)}"

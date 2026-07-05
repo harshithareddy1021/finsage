@@ -9,48 +9,82 @@ import os
 
 CHROMA_DIR = "data/chroma_db"
 
+CATEGORY_BENCHMARKS = {
+    "Food":          0.30,
+    "Shopping":      0.20,
+    "Transport":     0.15,
+    "Entertainment": 0.10,
+    "Utilities":     0.15,
+    "Healthcare":    0.10,
+    "Others":        0.10
+}
+
 def get_llm():
     return ChatGroq(
         api_key=GROQ_API_KEY,
-        
         model="llama-3.3-70b-versatile",
-        temperature=0.3
+        temperature=0.4
     )
 
 def generate_financial_advice(category_summary: dict, total_spent: float) -> tuple:
-    """
-    Generates financial advice using Groq LLM based on spending patterns.
-    Returns (advice_text, suggested_savings)
-    """
+    if total_spent == 0:
+        return "Add some transactions to get personalized advice.", 0
+
+    overspent = []
+    for category, amount in category_summary.items():
+        actual_pct = amount / total_spent
+        benchmark = CATEGORY_BENCHMARKS.get(category, 0.10)
+        diff = actual_pct - benchmark
+        if diff > 0.05:
+            overspent.append((category, amount, actual_pct * 100, benchmark * 100))
+
     spending_lines = "\n".join([
-        f"- {cat}: ₹{amt:.2f}"
+        f"- {cat}: ₹{amt:.2f} ({(amt/total_spent*100):.1f}% of spending, "
+        f"benchmark is {CATEGORY_BENCHMARKS.get(cat, 0.10)*100:.0f}%)"
         for cat, amt in category_summary.items()
     ])
 
-    prompt = f"""You are a helpful personal finance advisor for Indian users.
+    overspent_text = "\n".join([
+        f"- {cat}: spending {pct:.1f}% but benchmark is {bench:.0f}%"
+        for cat, amt, pct, bench in overspent
+    ]) if overspent else "None"
 
-A user's spending summary this period:
+    if overspent:
+        potential_savings = sum(
+            amt - (total_spent * CATEGORY_BENCHMARKS.get(cat, 0.10))
+            for cat, amt, _, _ in overspent
+        )
+        savings_pct = min(max((potential_savings / total_spent) * 100, 5), 40)
+    else:
+        potential_savings = total_spent * 0.10
+        savings_pct = 10
+
+    prompt = f"""You are a practical personal finance advisor for Indian users.
+
+User's spending breakdown:
 {spending_lines}
 Total spent: ₹{total_spent:.2f}
 
-Give 3 specific, actionable financial tips based on their actual spending pattern.
-Keep it concise, practical, and relevant to Indian context (UPI, SIP, savings).
-Do not use generic advice. Reference their specific spending categories."""
+Categories where user is overspending vs healthy benchmarks:
+{overspent_text}
+
+Potential monthly savings if benchmarks are met: ₹{potential_savings:.2f} ({savings_pct:.1f}%)
+
+Give exactly 3 specific, actionable tips. Each tip must:
+1. Reference a specific category from their data
+2. Give a concrete action (not generic advice)
+3. Be relevant to Indian context (UPI, SIP, Zomato, etc.)
+
+Format as 3 numbered points. Be direct and specific."""
 
     llm = get_llm()
     response = llm.invoke(prompt)
     advice = response.content
 
-    suggested_savings = total_spent * 0.20
-    return advice, suggested_savings
+    return advice, round(potential_savings, 2)
 
 
 def build_rag_from_pdf(pdf_path: str) -> RetrievalQA:
-    """
-    Builds a RAG pipeline from a financial PDF book.
-    Chunks the PDF, embeds it, stores in ChromaDB,
-    and returns a RetrievalQA chain.
-    """
     loader = PyPDFLoader(pdf_path)
     documents = loader.load()
 
@@ -60,7 +94,6 @@ def build_rag_from_pdf(pdf_path: str) -> RetrievalQA:
     )
     chunks = splitter.split_documents(documents)
 
-    
     embeddings = FakeEmbeddings(size=384)
 
     vectorstore = Chroma.from_documents(
@@ -69,63 +102,40 @@ def build_rag_from_pdf(pdf_path: str) -> RetrievalQA:
         persist_directory=CHROMA_DIR
     )
 
-    llm = get_llm()
-
     chain = RetrievalQA.from_chain_type(
-        llm=llm,
+        llm=get_llm(),
         chain_type="stuff",
-        retriever=vectorstore.as_retriever(
-            search_kwargs={"k": 3}
-        ),
+        retriever=vectorstore.as_retriever(search_kwargs={"k": 3}),
         return_source_documents=True
     )
     return chain
 
 
 def load_existing_rag() -> RetrievalQA:
-    """
-    Loads an already-built RAG chain from ChromaDB.
-    Returns None if no book has been uploaded yet.
-    """
     if not os.path.exists(CHROMA_DIR):
         return None
-
-    
     embeddings = FakeEmbeddings(size=384)
-
     vectorstore = Chroma(
         persist_directory=CHROMA_DIR,
         embedding_function=embeddings
     )
-
-    llm = get_llm()
-
     chain = RetrievalQA.from_chain_type(
-        llm=llm,
+        llm=get_llm(),
         chain_type="stuff",
-        retriever=vectorstore.as_retriever(
-            search_kwargs={"k": 3}
-        ),
+        retriever=vectorstore.as_retriever(search_kwargs={"k": 3}),
         return_source_documents=True
     )
     return chain
 
 
 def query_rag(question: str, spending_context: str = "") -> dict:
-    """
-    Queries the RAG chain with a financial question.
-    Optionally includes user spending context for personalized advice.
-    """
     chain = load_existing_rag()
     if chain is None:
         return {
             "result": "No financial book uploaded yet. Please upload a PDF first.",
             "source_documents": []
-
         }
-
     full_question = question
     if spending_context:
-        full_question = f"{question}\n\nUser's current spending context: {spending_context}"
-
+        full_question = f"{question}\n\nUser's spending context: {spending_context}"
     return chain.invoke({"query": full_question})

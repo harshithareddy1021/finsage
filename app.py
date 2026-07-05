@@ -4,52 +4,42 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import tempfile
 import os
-from datetime import date as date_type
+from datetime import date as date_type, timedelta
 
 from ocr.ocr_engine import extract_transaction_from_image
 from database.db import (
     create_table, save_transaction, load_transactions,
-    delete_transaction, register_user, login_user
+    delete_transaction, register_user, login_user, update_currency
 )
 from advice.advisor import generate_financial_advice, build_rag_from_pdf, query_rag
 from advice.sql_agent import query_expenses
+from utils.validators import validate_registration
 
-# ─────────────────────────────────────────
-# Init DB
-# ─────────────────────────────────────────
+from utils.currency import format_inr, get_usd_to_inr_rate, convert_to_inr
+from ml.anomaly import detect_anomalies, suggest_category
+
 create_table()
 
-# ─────────────────────────────────────────
-# Page Config
-# ─────────────────────────────────────────
 st.set_page_config(
-    page_title="FinanceAI",
+    page_title="FinSage",
     page_icon="💰",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# ─────────────────────────────────────────
-# Custom CSS
-# ─────────────────────────────────────────
 st.markdown("""
 <style>
-    /* Hide streamlit default header */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
-    header {visibility: hidden;}
-
-    /* Cards */
     .finance-card {
         background-color: #1e2130;
-        border: 1px solid #2d2d3a;
+        border: 1px solid #3d3d5a;
         border-radius: 12px;
         padding: 20px;
         margin: 10px 0;
         color: #ffffff;
+        line-height: 1.8;
     }
-
-    /* Logo */
     .logo-text {
         font-size: 2.5rem;
         font-weight: 800;
@@ -59,7 +49,6 @@ st.markdown("""
         text-align: center;
         margin-bottom: 8px;
     }
-
     .logo-subtitle {
         text-align: center;
         color: #9ca3af;
@@ -69,21 +58,18 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ─────────────────────────────────────────
-# Session State Init
-# ─────────────────────────────────────────
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
 if "user" not in st.session_state:
     st.session_state.user = None
 
-# ═══════════════════════════════════════════
-# AUTH PAGE
-# ═══════════════════════════════════════════
+if "usd_rate" not in st.session_state:
+    st.session_state.usd_rate = get_usd_to_inr_rate()
+
 def show_auth_page():
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
-        st.markdown('<div class="logo-text">💰 FinanceAI</div>', unsafe_allow_html=True)
+        st.markdown('<div class="logo-text">💰 FinSage</div>', unsafe_allow_html=True)
         st.markdown(
             '<div class="logo-subtitle">Your AI-powered personal finance advisor</div>',
             unsafe_allow_html=True
@@ -91,21 +77,23 @@ def show_auth_page():
 
         tab1, tab2 = st.tabs(["Login", "Register"])
 
-        # ── Login Tab ──
         with tab1:
             st.markdown("### Welcome back")
-            email = st.text_input("Email", key="login_email", placeholder="you@example.com")
-            password = st.text_input(
+            username_login = st.text_input(
+                "Username", key="login_username",
+                placeholder="Enter your username"
+            )
+            password_login = st.text_input(
                 "Password", type="password", key="login_password",
                 placeholder="Enter your password"
             )
-            st.markdown("")
             if st.button("Login", type="primary", key="login_btn", use_container_width=True):
-                if email and password:
-                    success, user, message = login_user(email, password)
+                if username_login and password_login:
+                    success, user, message = login_user(username_login, password_login)
                     if success:
                         st.session_state.logged_in = True
                         st.session_state.user = user
+                        st.session_state.currency = user.get("currency", "INR")
                         st.success(f"Welcome back, {user['name']}!")
                         st.rerun()
                     else:
@@ -113,58 +101,62 @@ def show_auth_page():
                 else:
                     st.error("Please fill in all fields.")
 
-        # ── Register Tab ──
         with tab2:
             st.markdown("### Create your account")
-            name = st.text_input("Full Name", key="reg_name", placeholder="John Doe")
-            email_reg = st.text_input("Email", key="reg_email", placeholder="you@example.com")
+            username_reg = st.text_input(
+                "Username", key="reg_username",
+                placeholder="Letters, numbers, underscores only"
+            )
+            email_reg = st.text_input(
+                "Email", key="reg_email",
+                placeholder="you@example.com"
+            )
             password_reg = st.text_input(
                 "Password", type="password", key="reg_password",
-                placeholder="Min 6 characters"
+                placeholder="Min 6 chars, must include a number"
             )
             password_confirm = st.text_input(
                 "Confirm Password", type="password", key="reg_confirm",
                 placeholder="Repeat your password"
             )
-            st.markdown("")
             if st.button("Create Account", type="primary", key="reg_btn", use_container_width=True):
-                if name and email_reg and password_reg and password_confirm:
-                    if len(password_reg) < 6:
-                        st.error("Password must be at least 6 characters.")
-                    elif password_reg != password_confirm:
-                        st.error("Passwords do not match.")
-                    else:
-                        success, message = register_user(name, email_reg, password_reg)
-                        if success:
-                            st.success("Account created! Please login.")
-                        else:
-                            st.error(message)
+                valid, errors = validate_registration(
+                    username_reg, email_reg, password_reg, password_confirm
+                )
+                if not valid:
+                    for error in errors:
+                        st.error(error)
                 else:
-                    st.error("Please fill in all fields.")
+                    success, message = register_user(
+                        username_reg, email_reg, password_reg
+                    )
+                    if success:
+                        st.success("✅ Account created! Please login.")
+                    else:
+                        st.error(message)
 
-# ═══════════════════════════════════════════
-# MAIN APP
-# ═══════════════════════════════════════════
+
 def show_main_app():
     user = st.session_state.user
     user_id = user["id"]
+    rate = st.session_state.usd_rate
 
-    # ── Sidebar ──
+    def fmt(amount):
+        return format_inr(amount)
+
     with st.sidebar:
         st.markdown(f"### 👤 {user['name']}")
-        st.caption(user['email'])
         st.divider()
 
-        page = st.radio(
-            "Navigate",
-            [
-                "📸 Upload & Extract",
-                "✏️ Manual Entry",
-                "💬 Ask Your Expenses",
-                "📚 Book Advisor",
-                "📊 Dashboard"
-            ]
-        )
+        page = st.radio("Navigate", [
+            "📸 Upload & Extract",
+            "✏️ Manual Entry",
+            "💬 Ask Your Expenses",
+            "📚 Book Advisor",
+            "📊 Dashboard"
+        ])
+
+        
 
         st.divider()
         if st.button("🚪 Logout", use_container_width=True):
@@ -172,9 +164,6 @@ def show_main_app():
             st.session_state.user = None
             st.rerun()
 
-    # ═══════════════════════════════════════
-    # PAGE 1 — Upload & Extract
-    # ═══════════════════════════════════════
     if page == "📸 Upload & Extract":
         st.title("📸 Upload Payment Screenshot")
         st.caption("Supports Swiggy, Zomato, GPay, PhonePe, Amazon, any UPI screenshot")
@@ -196,19 +185,41 @@ def show_main_app():
                 with st.spinner("🔍 AI is reading your screenshot..."):
                     transaction = extract_transaction_from_image(image)
 
+                if transaction.get("merchant"):
+                    suggested_cat = suggest_category(transaction["merchant"])
+                    if transaction.get("category") in [None, "Others"]:
+                        transaction["category"] = suggested_cat
+
                 st.subheader("✅ Extracted Details")
-                st.caption("Review and correct if needed before saving")
+                st.caption("Review and correct if needed")
 
-                merchant_val = transaction.get("merchant") or ""
-                transaction["merchant"] = st.text_input("Merchant", value=merchant_val)
-
-                amount_val = float(transaction.get("amount") or 0.0)
-                transaction["amount"] = st.number_input(
-                    "Amount (₹)", value=amount_val, min_value=0.0
+                transaction["merchant"] = st.text_input(
+                    "Merchant",
+                    value=transaction.get("merchant") or ""
                 )
 
-                date_val = transaction.get("date") or ""
-                transaction["date"] = st.text_input("Date", value=date_val)
+                col_curr, col_amt = st.columns([1, 2])
+                with col_curr:
+                    txn_currency = st.selectbox("Currency", ["INR", "USD"], key="upload_currency")
+                with col_amt:
+                    entered_amount = st.number_input(
+                        f"Amount ({txn_currency})",
+                        value=float(transaction.get("amount") or 0.0),
+                        min_value=0.0
+                    )
+
+                inr_amount = convert_to_inr(entered_amount, txn_currency, rate)
+                if txn_currency == "USD":
+                    st.caption(f"≈ ₹{inr_amount:,.2f} (at ₹{rate:.2f}/USD)")
+
+                transaction["amount"] = inr_amount
+                transaction["original_amount"] = entered_amount
+                transaction["original_currency"] = txn_currency
+                transaction["exchange_rate"] = rate if txn_currency == "USD" else 1.0
+
+                transaction["date"] = st.date_input(
+                    "Transaction Date", value=date_type.today()
+                ).isoformat()
 
                 categories = ["Food", "Shopping", "Transport",
                               "Entertainment", "Utilities", "Healthcare", "Others"]
@@ -239,10 +250,6 @@ def show_main_app():
                         st.balloons()
                     else:
                         st.error("Amount must be greater than 0.")
-
-    # ═══════════════════════════════════════
-    # PAGE 2 — Manual Entry
-    # ═══════════════════════════════════════
     elif page == "✏️ Manual Entry":
         st.title("✏️ Add Expense Manually")
         st.caption("No screenshot? Add your expense directly.")
@@ -253,43 +260,79 @@ def show_main_app():
             with col1:
                 merchant = st.text_input(
                     "Merchant / Shop Name",
-                    placeholder="e.g. Dominos, DMart, Ola"
+                    placeholder="e.g. Dominos, DMart, Ola, Netflix US"
                 )
-                amount = st.number_input("Amount (₹)", min_value=0.0, step=1.0)
+                col_curr, col_amt = st.columns([1, 2])
+                with col_curr:
+                    txn_currency = st.selectbox("Currency", ["INR", "USD"], key="manual_currency")
+                with col_amt:
+                    amount = st.number_input(f"Amount ({txn_currency})", min_value=0.0, step=1.0)
+
+                if txn_currency == "USD" and amount > 0:
+                    inr_preview = convert_to_inr(amount, "USD", rate)
+                    st.caption(f"≈ ₹{inr_preview:,.2f} (at ₹{rate:.2f}/USD)")
+
                 selected_date = st.date_input("Date", value=date_type.today())
             with col2:
+                categories = ["Food", "Shopping", "Transport",
+                              "Entertainment", "Utilities", "Healthcare", "Others"]
+
+                if "last_merchant_seen" not in st.session_state:
+                    st.session_state.last_merchant_seen = ""
+                if "manual_category_index" not in st.session_state:
+                    st.session_state.manual_category_index = categories.index("Others")
+
+                merchant_changed = merchant != st.session_state.last_merchant_seen
+
+                if merchant_changed:
+                    st.session_state.last_merchant_seen = merchant
+                    if merchant:
+                        # New merchant typed in → auto-suggest
+                        suggested = suggest_category(merchant)
+                        st.session_state.manual_category_index = categories.index(suggested)
+                    else:
+                        # Merchant cleared → reset to Others
+                        st.session_state.manual_category_index = categories.index("Others")
+
                 category = st.selectbox(
                     "Category",
-                    ["Food", "Shopping", "Transport",
-                     "Entertainment", "Utilities", "Healthcare", "Others"]
+                    categories,
+                    index=st.session_state.manual_category_index,
+                    key="manual_entry_category_select"
                 )
+                # Save whatever the user currently has selected (manual or auto)
+                st.session_state.manual_category_index = categories.index(category)
                 payment_method = st.selectbox(
                     "Payment Method",
-                    ["UPI", "Credit Card", "Debit Card", "Net Banking", "Cash", "Unknown"]
+                    ["UPI", "Credit Card", "Debit Card",
+                     "Net Banking", "Cash", "Unknown"]
                 )
 
             submitted = st.form_submit_button("💾 Save Expense", type="primary")
             if submitted:
                 if amount > 0:
-                    transaction = {
+                    inr_amount = convert_to_inr(amount, txn_currency, rate)
+                    save_transaction({
                         "merchant": merchant if merchant else "Unknown Merchant",
-                        "amount": amount,
-                        "date": selected_date.strftime("%d/%m/%Y"),
+                        "amount": inr_amount,
+                        "original_amount": amount,
+                        "original_currency": txn_currency,
+                        "exchange_rate": rate if txn_currency == "USD" else 1.0,
+                        "date": selected_date.isoformat(),
                         "category": category,
                         "payment_method": payment_method
-                    }
-                    save_transaction(transaction, user_id)
-                    st.success(f"✅ ₹{amount} expense saved!")
+                    }, user_id)
+                    st.success(f"✅ {fmt(inr_amount)} expense saved!")
                     st.balloons()
                 else:
                     st.error("Amount must be greater than 0.")
+      
 
-    # ═══════════════════════════════════════
-    # PAGE 3 — Ask Your Expenses
-    # ═══════════════════════════════════════
+            
+
     elif page == "💬 Ask Your Expenses":
         st.title("💬 Ask About Your Spending")
-        st.caption("Ask anything in plain English. Powered by LangChain SQL Agent.")
+        st.caption("Powered by LangChain SQL Agent")
         st.divider()
 
         st.info("""
@@ -307,25 +350,55 @@ def show_main_app():
         )
 
         if st.button("🔍 Ask", type="primary") and question:
-            with st.spinner("🤖 LangChain SQL Agent is thinking..."):
+            with st.spinner("🤖 Thinking..."):
                 answer = query_expenses(question)
             st.subheader("Answer:")
-            st.markdown(f"""
-            <div class="finance-card">
-                {answer}
-            </div>
-            """, unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="finance-card">{answer}</div>',
+                unsafe_allow_html=True
+            )
 
         st.divider()
-        st.subheader("📜 All Transactions")
-        transactions = load_transactions(user_id)
+
+        st.subheader("📜 Transaction History")
+        col1, col2, col3 = st.columns([2, 2, 3])
+        with col1:
+            filter_type = st.selectbox(
+                "Filter",
+                ["All", "Today", "This Week", "This Month", "Custom"]
+            )
+        start_date = end_date = None
+        if filter_type == "Custom":
+            with col2:
+                start_date = st.date_input("From", value=date_type.today() - timedelta(days=30))
+            with col3:
+                end_date = st.date_input("To", value=date_type.today())
+
+        transactions = load_transactions(user_id, filter_type, start_date, end_date)
+
         if transactions:
+            anomalous_ids = detect_anomalies(transactions)
+
             df = pd.DataFrame(transactions)
-            st.dataframe(df, use_container_width=True)
+            df["amount_display"] = df["amount"].apply(lambda x: fmt(x))
+            if anomalous_ids:
+                df["⚠️"] = df["id"].apply(
+                    lambda x: "⚠️ Unusual" if x in anomalous_ids else ""
+                )
+
+            display_cols = ["merchant", "amount_display", "date",
+                            "category", "payment_method"]
+            if anomalous_ids:
+                display_cols.append("⚠️")
+
+            st.dataframe(df[display_cols], use_container_width=True)
+
+            if anomalous_ids:
+                st.warning(f"⚠️ {len(anomalous_ids)} transaction(s) flagged as unusually high for their category.")
 
             st.subheader("🗑️ Delete a Transaction")
             transaction_options = {
-                f"#{t['id']} — {t['merchant']} — ₹{t['amount']} — {t['date']}": t['id']
+                f"#{t['id']} — {t['merchant']} — {fmt(t['amount'])} — {t['date']}": t['id']
                 for t in transactions
             }
             selected = st.selectbox(
@@ -333,19 +406,15 @@ def show_main_app():
                 options=list(transaction_options.keys())
             )
             if st.button("🗑️ Delete Selected", type="primary"):
-                transaction_id = transaction_options[selected]
-                delete_transaction(transaction_id, user_id)
-                st.success("✅ Transaction deleted!")
+                delete_transaction(transaction_options[selected], user_id)
+                st.success("✅ Deleted!")
                 st.rerun()
         else:
-            st.info("No transactions yet. Upload a screenshot or add manually.")
+            st.info("No transactions found for the selected period.")
 
-    # ═══════════════════════════════════════
-    # PAGE 4 — Book Advisor
-    # ═══════════════════════════════════════
     elif page == "📚 Book Advisor":
         st.title("📚 Financial Book Advisor")
-        st.caption("Upload any financial book as PDF and ask questions personalized to your spending.")
+        st.caption("Upload any financial book as PDF and get personalized advice.")
         st.divider()
 
         pdf_file = st.file_uploader("Upload Financial Book (PDF)", type=["pdf"])
@@ -353,10 +422,10 @@ def show_main_app():
             with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
                 tmp.write(pdf_file.read())
                 tmp_path = tmp.name
-            with st.spinner("📖 Building RAG pipeline from your book..."):
+            with st.spinner("📖 Building RAG pipeline..."):
                 build_rag_from_pdf(tmp_path)
             os.unlink(tmp_path)
-            st.success("✅ Book indexed! Ask your questions below.")
+            st.success("✅ Book indexed! Ask questions below.")
 
         st.divider()
 
@@ -367,7 +436,10 @@ def show_main_app():
             df["amount"] = pd.to_numeric(df["amount"], errors="coerce")
             total = df["amount"].sum()
             by_category = df.groupby("category")["amount"].sum().to_dict()
-            spending_context = f"Total spent: ₹{total:.2f}. By category: {by_category}"
+            spending_context = (
+                f"Total spent: ₹{total:.2f}. "
+                f"By category: {by_category}"
+            )
 
         book_question = st.text_input(
             "Ask the book",
@@ -375,60 +447,82 @@ def show_main_app():
         )
 
         if st.button("📖 Ask Book", type="primary") and book_question:
-            with st.spinner("🔍 Searching book for personalized advice..."):
+            with st.spinner("🔍 Searching book..."):
                 result = query_rag(book_question, spending_context)
             st.subheader("Answer:")
-            st.markdown(f"""
-            <div class="finance-card">
-                {result["result"]}
-            </div>
-            """, unsafe_allow_html=True)
-
+            st.markdown(
+                f'<div class="finance-card">{result["result"]}</div>',
+                unsafe_allow_html=True
+            )
             if result.get("source_documents"):
-                with st.expander("📄 Sources from the book"):
+                with st.expander("📄 Sources"):
                     for doc in result["source_documents"]:
                         page_num = doc.metadata.get("page", "N/A")
                         st.caption(f"Page {page_num}: {doc.page_content[:200]}...")
 
-    # ═══════════════════════════════════════
-    # PAGE 5 — Dashboard
-    # ═══════════════════════════════════════
     elif page == "📊 Dashboard":
         st.title("📊 Spending Dashboard")
-        st.caption(f"Welcome back, {user['name']}. Here's your financial overview.")
+        st.caption(f"Welcome back, {user['name']}. Currency:  All amounts in INR (₹)")
         st.divider()
 
-        transactions = load_transactions(user_id)
+        col1, col2, col3 = st.columns([2, 2, 3])
+        with col1:
+            dash_filter = st.selectbox(
+                "Period",
+                ["All", "Today", "This Week", "This Month", "Custom"],
+                key="dash_filter"
+            )
+        dash_start = dash_end = None
+        if dash_filter == "Custom":
+            with col2:
+                dash_start = st.date_input(
+                    "From", value=date_type.today() - timedelta(days=30),
+                    key="dash_start"
+                )
+            with col3:
+                dash_end = st.date_input(
+                    "To", value=date_type.today(),
+                    key="dash_end"
+                )
+
+        transactions = load_transactions(user_id, dash_filter, dash_start, dash_end)
 
         if not transactions:
-            st.info("No transactions yet. Upload screenshots or add expenses manually to see your dashboard.")
+            st.info("No transactions for this period.")
         else:
             df = pd.DataFrame(transactions)
             df["amount"] = pd.to_numeric(df["amount"], errors="coerce")
+            df["transaction_date"] = pd.to_datetime(df["date"])
 
             total_spent = df["amount"].sum()
             category_summary = df.groupby("category")["amount"].sum()
             highest_category = category_summary.idxmax()
             avg_transaction = df["amount"].mean()
 
-            # ── Metrics ──
+            anomalous_ids = detect_anomalies(transactions)
+
             col1, col2, col3, col4 = st.columns(4)
-            col1.metric("💸 Total Spent", f"₹{total_spent:.2f}")
+            col1.metric("💸 Total Spent", fmt(total_spent))
             col2.metric("📦 Transactions", len(df))
             col3.metric("🏆 Top Category", highest_category)
-            col4.metric("📊 Avg Transaction", f"₹{avg_transaction:.2f}")
+            col4.metric("📊 Avg Transaction", fmt(avg_transaction))
+
+            if anomalous_ids:
+                st.warning(
+                    f"⚠️ {len(anomalous_ids)} unusual transaction(s) detected. "
+                    f"Check 'Ask Your Expenses' for details."
+                )
 
             st.divider()
 
-            # ── Charts ──
             col1, col2 = st.columns(2)
+            colors = ["#6c63ff", "#a78bfa", "#60a5fa",
+                      "#34d399", "#fbbf24", "#f87171", "#e879f9"]
 
             with col1:
                 st.subheader("Spending by Category")
                 fig, ax = plt.subplots(facecolor="#1e2130")
                 ax.set_facecolor("#1e2130")
-                colors = ["#6c63ff", "#a78bfa", "#60a5fa",
-                          "#34d399", "#fbbf24", "#f87171", "#e879f9"]
                 wedges, texts, autotexts = ax.pie(
                     category_summary,
                     labels=category_summary.index,
@@ -436,53 +530,67 @@ def show_main_app():
                     startangle=90,
                     colors=colors[:len(category_summary)]
                 )
-                for text in texts:
-                    text.set_color("#ffffff")
-                for autotext in autotexts:
-                    autotext.set_color("#ffffff")
+                for t in texts:
+                    t.set_color("#ffffff")
+                for t in autotexts:
+                    t.set_color("#ffffff")
                 st.pyplot(fig)
 
             with col2:
                 st.subheader("Category Breakdown")
-                chart_data = pd.DataFrame({
-                    "Amount (₹)": category_summary
-                })
-                st.bar_chart(chart_data)
+                st.bar_chart(category_summary)
 
             st.divider()
 
-            # ── Payment Method Breakdown ──
-            st.subheader("Payment Methods Used")
+            st.subheader("📈 Spending Over Time")
+            st.caption("Shows your total spending per day — add more transactions across different dates to see trends")
+            daily = df.groupby("transaction_date")["amount"].sum().reset_index()
+            if len(daily) >= 2:
+                daily.columns = ["Date", "Amount (₹)"]
+                st.line_chart(daily.set_index("Date"))
+            else:
+                st.info("Add transactions across at least 2 different dates to see your spending trend.")
+            
+
+            st.subheader("Payment Methods")
             payment_summary = df.groupby("payment_method")["amount"].sum()
+             
             st.bar_chart(payment_summary)
 
             st.divider()
 
-            # ── AI Advice ──
             st.subheader("🤖 AI Financial Advice")
-            st.caption("Personalized advice based on your actual spending")
+            st.caption("Dynamic advice based on your spending patterns vs healthy benchmarks")
             if st.button("✨ Generate Advice", type="primary"):
                 with st.spinner("Analyzing your spending patterns..."):
-                    advice, savings = generate_financial_advice(
+                    advice, potential_savings = generate_financial_advice(
                         category_summary.to_dict(),
                         total_spent
                     )
-                st.markdown(f"""
-                <div class="finance-card">
-                    {advice}
-                </div>
-                """, unsafe_allow_html=True)
-                st.success(f"💡 Save 20% and you could keep ₹{savings:.2f} this period!")
+                st.markdown(
+                    f'<div class="finance-card">{advice}</div>',
+                    unsafe_allow_html=True
+                )
+                savings_display = fmt(potential_savings)
+                st.success(
+                    f"💡 Estimated monthly savings potential: {savings_display} "
+                    f"based on your actual spending patterns"
+                )
 
             st.divider()
 
-            # ── Transaction History ──
             st.subheader("Recent Transactions")
-            st.dataframe(df, use_container_width=True)
+            df["amount_display"] = df["amount"].apply(fmt)
+            if anomalous_ids:
+                df["⚠️"] = df["id"].apply(
+                    lambda x: "⚠️ Unusual" if x in anomalous_ids else ""
+                )
+            display_cols = ["merchant", "amount_display", "date", "category", "payment_method"]
+            if anomalous_ids:
+                display_cols.append("⚠️")
+            st.dataframe(df[display_cols], use_container_width=True)
 
-# ─────────────────────────────────────────
-# Router
-# ─────────────────────────────────────────
+
 if not st.session_state.logged_in:
     show_auth_page()
 else:
